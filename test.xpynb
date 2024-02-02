@@ -1,4 +1,4 @@
-Tiens c'est mon code t'en fais ce que tu veux :
+
 
 import torch
 import torch.nn.functional as F
