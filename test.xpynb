@@ -1,0 +1,114 @@
+Tiens c'est mon code t'en fais ce que tu veux :
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from transformers import RobertaTokenizer, GPT2Tokenizer, RobertaModel, GPT2Model
+from torch.nn import Module, Linear, ReLU, MSELoss
+from torch.optim import Adam
+import pandas as pd
+
+access_token_hf = "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"
+
+# Définir la classe du DataLoader
+class LyricsDataset(Dataset):
+    def __init__(self, titles, lyrics, max_length=256):  # Définir la taille maximale souhaitée
+        self.titles = titles
+        self.lyrics = lyrics
+        self.tokenizer_title = RobertaTokenizer.from_pretrained('roberta-base', token=access_token_hf, padding=True)
+        self.tokenizer_lyrics = GPT2Tokenizer.from_pretrained('gpt2', token=access_token_hf, padding=True)
+        self.tokenizer_lyrics.add_special_tokens({'pad_token': '[PAD]'})
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.titles)
+
+    def __getitem__(self, idx):
+        title_tokens = self.tokenizer_title.encode(self.titles[idx], return_tensors='pt', truncation=True)
+        lyrics_tokens = self.tokenizer_lyrics.encode(self.lyrics[idx], return_tensors='pt', truncation=True)
+
+        title_tokens = F.pad(title_tokens, (0, self.max_length - title_tokens.shape[1]))
+        lyrics_tokens = F.pad(lyrics_tokens, (0, self.max_length - lyrics_tokens.shape[1]))
+
+        return [title_tokens, lyrics_tokens]
+
+# Définir la classe de l'AutoEncoder
+class LyricsAutoEncoder(Module):
+    def __init__(self):
+        super(LyricsAutoEncoder, self).__init__()
+        self.encoder = RobertaModel.from_pretrained('roberta-base', token=access_token_hf)
+        self.decoder = GPT2Model.from_pretrained('gpt2', token=access_token_hf)
+        self.linear = Linear(self.encoder.config.hidden_size, self.decoder.config.hidden_size)
+        self.relu = ReLU()
+
+    def forward(self, title_tokens):
+        title_tokens = title_tokens.view(-1, title_tokens.shape[-1])
+        encoded_title = self.encoder(title_tokens).last_hidden_state.mean(dim=1)
+        linear_output = self.relu(self.linear(encoded_title))
+        long_output = linear_output.long()
+        decoded_lyrics = self.decoder(long_output)
+        return decoded_lyrics.last_hidden_state
+
+# Load the data
+file_path = '/content/ArianaGrande.csv'
+dataset = pd.read_csv(file_path)
+
+# Filter the data
+selected_columns = ['Title', 'Lyric']
+filtered_dataset = dataset[selected_columns]
+filtered_dataset = filtered_dataset.dropna()
+filtered_dataset_final = filtered_dataset.head(5)
+
+# Initialize the DataLoader
+titles = filtered_dataset_final['Title'].tolist()
+lyrics = filtered_dataset_final['Lyric'].tolist()
+dataset = LyricsDataset(titles, lyrics)
+dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
+
+# Initialize the model
+model = LyricsAutoEncoder()
+
+# Define the loss function and optimizer
+criterion = MSELoss()
+optimizer = Adam(model.parameters(), lr=0.001)
+
+# Train the model
+num_epochs = 10
+for epoch in range(num_epochs):
+    print(f"Epoch {epoch+1}/{num_epochs}")
+    running_loss = 0.0
+    for i, data in enumerate(dataloader, 0):
+        title_tokens, lyrics_tokens = data[0], data[1]
+        optimizer.zero_grad()
+        output = model(title_tokens)
+        output = output[:, :, :lyrics_tokens.shape[2]]
+        lyrics_tokens = lyrics_tokens.float()
+        loss = criterion(output, lyrics_tokens)
+        print(f"Step {i+1}, Loss: {loss.item()}")
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+    torch.save(model.state_dict(), f'/content/lyrics_autoencoder_{epoch+1}.pth')
+
+# Load the final model
+model.load_state_dict(torch.load('/content/lyrics_autoencoder_10.pth'))
+
+
+def generate_lyrics(title):
+    # Encode the title
+    title_tokens = dataset.tokenizer_title.encode(title, return_tensors='pt')
+
+    # Pass the encoded title through the model to get the predicted lyrics
+    output = model(title_tokens)
+
+    # Get the predicted lyrics by taking the argmax over the last dimension
+    predicted_lyrics_ids = output.argmax(dim=-1)
+
+    # Decode the predicted lyrics
+    predicted_lyrics = dataset.tokenizer_lyrics.decode(predicted_lyrics_ids[0])
+
+    return predicted_lyrics
+
+# Exemple d'utilisation
+generated_song = generate_lyrics("Goodbye")
+print(generated_song)
